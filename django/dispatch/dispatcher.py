@@ -46,6 +46,7 @@ class Signal(object):
         # 'sender_receivers_cache'. The cache is cleaned when .connect() or
         # .disconnect() is called and populated on send().
         self.sender_receivers_cache = weakref.WeakKeyDictionary() if use_caching else {}
+        self._dead_receivers = False
 
     def connect(self, receiver, sender=None, weak=True, dispatch_uid=None):
         """
@@ -114,6 +115,7 @@ class Signal(object):
             receiver = saferef.safeRef(receiver, onDelete=self._remove_receiver)
 
         with self.lock:
+            self._clear_dead_receivers()
             for r_key, _ in self.receivers:
                 if r_key == lookup_key:
                     break
@@ -149,6 +151,7 @@ class Signal(object):
             lookup_key = (_make_id(receiver), _make_id(sender))
 
         with self.lock:
+            self._clear_dead_receivers()
             for index in xrange(len(self.receivers)):
                 (r_key, _) = self.receivers[index]
                 if r_key == lookup_key:
@@ -224,6 +227,17 @@ class Signal(object):
                 responses.append((receiver, response))
         return responses
 
+    def _clear_dead_receivers(self):
+         # Note: caller is assumed to hold self.lock.
+         if self._dead_receivers:
+             self._dead_receivers = False
+             new_receivers = []
+             for r in self.receivers:
+                 if isinstance(r[1], weakref.ReferenceType) and r[1]() is None:
+                     continue
+                 new_receivers.append(r)
+             self.receivers = new_receivers
+
     def _live_receivers(self, sender):
         """
         Filter sequence of receivers to get resolved, live receivers.
@@ -232,7 +246,7 @@ class Signal(object):
         live receivers.
         """
         receivers = None
-        if self.use_caching:
+        if self.use_caching and not self._dead_receivers:
             receivers = self.sender_receivers_cache.get(sender)
             # We could end up here with NO_RECEIVERS even if we do check this case in
             # .send() prior to calling _live_receivers() due to concurrent .send() call.
@@ -240,6 +254,7 @@ class Signal(object):
                 return []
         if receivers is None:
             with self.lock:
+                self._clear_dead_receivers()
                 senderkey = _make_id(sender)
                 receivers = []
                 for (receiverkey, r_senderkey), receiver in self.receivers:
@@ -263,23 +278,13 @@ class Signal(object):
         return non_weak_receivers
 
     def _remove_receiver(self, receiver):
-        """
-        Remove dead receivers from connections.
-        """
-
-        with self.lock:
-            to_remove = []
-            for key, connected_receiver in self.receivers:
-                if connected_receiver == receiver:
-                    to_remove.append(key)
-            for key in to_remove:
-                last_idx = len(self.receivers) - 1
-                # enumerate in reverse order so that indexes are valid even
-                # after we delete some items
-                for idx, (r_key, _) in enumerate(reversed(self.receivers)):
-                    if r_key == key:
-                        del self.receivers[last_idx - idx]
-            self.sender_receivers_cache.clear()
+         # Mark that the self.receivers list has dead weakrefs. If so, we will
+         # clean those up in connect, disconnect and _live_receivers while
+         # holding self.lock. Note that doing the cleanup here isn't a good
+         # idea, _remove_receiver() will be called as side effect of garbage
+         # collection, and so the call can happen while we are already holding
+         # self.lock.
+         self._dead_receivers = True
 
 
 def receiver(signal, **kwargs):
