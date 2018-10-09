@@ -233,7 +233,7 @@ class Signal(object):
              self._dead_receivers = False
              new_receivers = []
              for r in self.receivers:
-                 if isinstance(r[1], weakref.ReferenceType) and r[1]() is None:
+                 if isinstance(r[1], WEAKREF_TYPES) and r[1]() is None:
                      continue
                  new_receivers.append(r)
              self.receivers = new_receivers
